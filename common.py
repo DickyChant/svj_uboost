@@ -1361,19 +1361,30 @@ def split_bdt(sel):
 def calc_bdt_scores(X, model_file=bdt_model_file):
     import xgboost as xgb
     # Load the model and get the predictions
-    xgb_model = xgb.XGBClassifier()
-    xgb_model.load_model(model_file)
     with time_and_log(f'Calculating xgboost scores for {bdt_model_file}...'):
-        score = xgb_model.predict_proba(X)[:,1]
-    del xgb_model
+        try:
+            xgb_model = xgb.XGBClassifier()
+            xgb_model.load_model(model_file)
+            score = xgb_model.predict_proba(X)[:,1]
+            del xgb_model
+        except TypeError:
+            # sklearn/xgboost API clash (e.g. LCG_109 view): the raw booster gives the same
+            # probabilities for this binary:logistic model
+            booster = xgb.Booster()
+            booster.load_model(model_file)
+            score = booster.predict(xgb.DMatrix(X))
     return score
 
 
 DDT_PATH_BDTBASED='root://cmseos.fnal.gov//store/user/lpcdarkqcd/boosted/BDT_based/'
-DDT_FILE_BDTBASED='models/bdt_ddt_map_ANv6_3d.json'
+DDT_FILE_BDTBASED=os.environ.get('SVJ_BDT_DDT_MAP', 'models/bdt_ddt_map_ANv6_3d.json')
 DDT_FILE_BDTBASED_RT_DDT='models/bdt_ddt_withRT_ANv6_3d.json'
+# Smearing of the BDT DDT map at lookup (override with SVJ_BDT_DDT_SMEAR or by setting this attribute)
+BDT_DDT_SMEAR=float(os.environ.get('SVJ_BDT_DDT_SMEAR', RT_DDT_SMEAR))
 
-def apply_bdtbased(cols,wp,lumi,anti=False,model_file=bdt_model_file,ddt_map_file=DDT_FILE_BDTBASED, xrootd_url=DDT_PATH_BDTBASED):
+def apply_bdtbased(cols,wp,lumi,anti=False,model_file=bdt_model_file,ddt_map_file=None, xrootd_url=DDT_PATH_BDTBASED):
+    # resolved at call time, so that changing DDT_FILE_BDTBASED also reaches callers relying on the default
+    if ddt_map_file is None: ddt_map_file = DDT_FILE_BDTBASED
     check_if_model_exists(ddt_map_file, xrootd_url)
     check_if_model_exists(model_file, xrootd_url)
 
@@ -1385,7 +1396,7 @@ def apply_bdtbased(cols,wp,lumi,anti=False,model_file=bdt_model_file,ddt_map_fil
     mT = cols.to_numpy(['mt']).ravel()
     pT = cols.to_numpy(['pt']).ravel()
     rT_mask = np.ones_like(mT, dtype=bool)
-    bdt_ddt_score = calculate_varDDT(mT, pT, rT_mask, score, wp, ddt_map_file, smear=RT_DDT_SMEAR)
+    bdt_ddt_score = calculate_varDDT(mT, pT, rT_mask, score, wp, ddt_map_file, smear=BDT_DDT_SMEAR)
 
     if anti:
         cols = cols.select(bdt_ddt_score < 0.0) # mask for the selection
