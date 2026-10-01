@@ -670,14 +670,34 @@ def smooth_shapes():
     mtmin = common.pull_arg('--mtmin', type=float, default=None).mtmin
     mtmax = common.pull_arg('--mtmax', type=float, default=None).mtmax
     norm = not common.pull_arg('--unnorm', default=False, action="store_true", help="fit unnormalized shape").unnorm
+    ratio_span = common.pull_arg('--ratio-span', type=float, default=0.,
+        help="signal systematics: smooth the ratio variation/central (LOESS with this span) and apply it to the smoothed "
+             "central, instead of smoothing each variation separately (0: off)").ratio_span
     json_files = common.pull_arg('jsonfiles', nargs='+', type=str).jsonfiles
 
     with common.mp_pool() as p:
-        args = [(span_val, span_min, span_max, simple, leak_tol, min_run, gcv_tol, do_opt, default, target, debug, var, save, mtmin, mtmax, norm, f ) for f in json_files]
+        args = [(span_val, span_min, span_max, simple, leak_tol, min_run, gcv_tol, do_opt, default, target, debug, var, save, mtmin, mtmax, norm, f, ratio_span) for f in json_files]
         p.starmap(smooth_shape_single, args)
 
 
-def smooth_shape_single(span_val, span_min, span_max, simple, leak_tol, min_run, gcv_tol, do_opt, default, target, debug, var, save , mtmin, mtmax, norm, json_file):
+def smooth_ratio_to_central(hist, raw_central, central_smooth, span):
+    """Variation = smoothed central x LOESS-smoothed ratio of the raw variation to the raw central.
+    Variations are made from the same MC events as the central template, so their bin-to-bin differences are
+    migrations with the MC statistical noise of the sample; smoothing each variation separately (with the central's
+    span) keeps that noise in the ratio where the MC statistics are low, and the fit then sees a noisy shape
+    systematic scaled by r. The ratio is smoothed with weights from the central's relative MC precision per bin."""
+    ok = raw_central.vals > 0
+    ratio = hist.copy()
+    ratio.vals = np.where(ok, hist.vals / np.where(ok, raw_central.vals, 1.), 1.)
+    ratio.errs = np.where(ok, raw_central.errs / np.where(ok, raw_central.vals, 1.), 1.)
+    pred, _ = do_loess(ratio, span=span)
+    out = central_smooth.copy()
+    out.vals = central_smooth.vals * pred
+    out.errs = central_smooth.errs * pred
+    return out
+
+
+def smooth_shape_single(span_val, span_min, span_max, simple, leak_tol, min_run, gcv_tol, do_opt, default, target, debug, var, save , mtmin, mtmax, norm, json_file, ratio_span=0.):
     # keep only regions with at least min_run consecutive True values
     # (avoid one-point outliers)
     def consec_true_mask(mask, min_run):
@@ -731,11 +751,22 @@ def smooth_shape_single(span_val, span_min, span_max, simple, leak_tol, min_run,
         target = var
         variations = [var]
         save_all = False
+    central_uncut = None     # smoothed central before the mT cut (for --ratio-span)
     for var in variations:
         hist = mths[var]
         hyield = hist.vals.sum()
         common.logger.info(f'{var} integral: {hyield}')
         meta = hist.metadata
+
+        if ratio_span > 0 and var != default and h_default.metadata["sample_type"] == "sig":
+            if central_uncut is None:
+                raise ValueError("--ratio-span needs the normalised central template smoothed before the variations "
+                                 "(not available with --unnorm, --var, or a --target other than the central)")
+            hsmooth = smooth_ratio_to_central(hist, mths[default], central_uncut, ratio_span).cut(**cut_args)
+            meta["ratio_span"] = ratio_span
+            hsmooth.metadata = meta
+            mths_new[var] = hsmooth
+            continue
 
         # normalize shape to unit area, then scale prediction by original yield
         if norm: hist = hist*(1./hyield)
@@ -805,6 +836,8 @@ def smooth_shape_single(span_val, span_min, span_max, simple, leak_tol, min_run,
         # cuts applied *after* interpolation
         if norm:
             hsmooth = hsmooth*hyield
+            if var == default:
+                central_uncut = hsmooth.copy()
             hsmooth = hsmooth.cut(**cut_args)
         mths_new[var] = hsmooth
         if var=='central':
