@@ -1,4 +1,4 @@
-import os, os.path as osp, logging, re, time, json, argparse, sys, math, shutil, subprocess
+import os, os.path as osp, logging, re, time, json, argparse, sys, math, shutil, subprocess, hashlib
 import matplotlib.pyplot as plt
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -1213,11 +1213,54 @@ def _smoothing_shifts_for_map(var_map, edges, mt, pt, rt_sel, var, weight, neff,
         shifts[str(float(sigma))] = ddt_smoothing_shifts(regularize_ddt_map(var_map, neff, sigma), mt, pt, slices, var, weight, edges, targets)
     return shifts
 
-def add_ddt_smoothing_info(ddt_name, mt, pt, rt_sel, var, weight, smooth_sigmas, cut_vals=None, recalibration_rt_sel=None, out_name=None):
+def ddt_smoothing_info_name(ddt_name):
+    '''Default file for the on-the-fly smoothing information of a DDT map: next to it, <map name>_smoothing.json'''
+    root, ext = osp.splitext(ddt_name)
+    return root + '_smoothing' + (ext or '.json')
+
+def _file_md5(path):
+    with open(path, 'rb') as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+def load_ddt_smoothing_info(ddt_name, info_name=None):
     '''
-    Adds the information for on-the-fly smoothing (N_eff per bin, one shift per RT slice for each width) to the
-    metadata of an existing DDT map file, for instance one made before this option existed. The stored thresholds are
-    not changed.
+    The on-the-fly smoothing information of a DDT map (default file: ddt_smoothing_info_name). It records the md5 of the
+    map file it was made for, so it cannot be applied to another map or to another version of the same map.
+    '''
+    info_name = info_name or ddt_smoothing_info_name(ddt_name)
+    if not osp.exists(info_name):
+        raise FileNotFoundError(f"No smoothing information {info_name} for {ddt_name}: make it with add_ddt_smoothing_info "
+                                "(apply_DDT.py --smooth_sigmas)")
+    with open(info_name, 'r') as f:
+        info = json.load(f)
+    if info.get("map_md5") != _file_md5(ddt_name):
+        raise ValueError(f"{info_name} was made for a different version of {ddt_name} (md5 mismatch); remake it")
+    return info
+
+def _write_ddt_smoothing_info(ddt_name, neff, shifts, info_name=None):
+    '''
+    Writes the smoothing information of a DDT map to its own file; the map file is only read. Shifts already in that
+    file for the same map file are kept unless recomputed.
+    '''
+    info_name = info_name or ddt_smoothing_info_name(ddt_name)
+    md5 = _file_md5(ddt_name)
+    info = {"map_file": osp.basename(ddt_name), "map_md5": md5, "neff": neff, "smoothing_shifts": {}}
+    if osp.exists(info_name):
+        with open(info_name, 'r') as f:
+            old = json.load(f)
+        if old.get("map_md5") == md5:
+            info["smoothing_shifts"] = old.get("smoothing_shifts", {})
+    for key, by_sigma in shifts.items():
+        info["smoothing_shifts"].setdefault(key, {}).update(by_sigma)
+    with open(info_name, 'w') as f:
+        json.dump(info, f, cls=NumpyArrayEncoder)
+    return info_name
+
+def add_ddt_smoothing_info(ddt_name, mt, pt, rt_sel, var, weight, smooth_sigmas, cut_vals=None, recalibration_rt_sel=None, info_name=None):
+    '''
+    Computes the information for on-the-fly smoothing of an existing DDT map (N_eff per bin, one shift per RT slice for
+    each width) and writes it to a separate file (default: ddt_smoothing_info_name(ddt_name)). The map file is only
+    read, never written, so the original map is kept as it is.
 
     Inputs:
     - mt, pt, rt_sel, var, weight: the events the map was built from, with the same selection, weights and RT slices
@@ -1225,15 +1268,15 @@ def add_ddt_smoothing_info(ddt_name, mt, pt, rt_sel, var, weight, smooth_sigmas,
     - cut_vals: working points to prepare (default: all in the file)
     - recalibration_rt_sel: {sigma: RT slice of each event} if the RT selection applied with this map is smoothed on the
       fly too (default: rt_sel)
-    - out_name: output file (default: ddt_name, updated in place)
-    The target efficiency of each working point is taken from the metadata if present, otherwise it is the efficiency of
-    the stored map on these events, per RT slice.
+    - info_name: output file for the smoothing information
+    The target efficiency of each working point is taken from the map metadata if present, otherwise it is the
+    efficiency of the stored map on these events, per RT slice. Returns the name of the information file.
     '''
     with open(ddt_name, 'r') as f:
         var_dict = json.load(f)
-    meta = var_dict.setdefault("metadata", {})
+    meta = var_dict.get("metadata", {})
     keys = [k for k in var_dict if k != "metadata"] if cut_vals is None else [str(c) for c in cut_vals if str(c) in var_dict]
-    shifts = meta.get("smoothing_shifts", {})
+    shifts = {}
     cuts = ddt_windowcuts(mt, pt)
     neff = None
     for key in keys:
@@ -1250,13 +1293,10 @@ def add_ddt_smoothing_info(ddt_name, mt, pt, rt_sel, var, weight, smooth_sigmas,
             passed = var[cuts] > var_map[mt_pt_bin, pt_bin, rt_bin]
             w = weight[cuts].astype(np.float64)
             targets = [float(np.sum(w[passed & (rt_bin == k)]) / max(np.sum(w[rt_bin == k]), 1e-300)) for k in range(var_map.shape[2])]
-        shifts.setdefault(key, {}).update(_smoothing_shifts_for_map(var_map, edges, mt, pt, rt_sel, var, weight, neff, smooth_sigmas, targets, recalibration_rt_sel))
-    meta["neff"] = neff
-    meta["smoothing_shifts"] = shifts
-    with open(out_name or ddt_name, 'w') as f:
-        json.dump(var_dict, f, cls=NumpyArrayEncoder)
+        shifts[key] = _smoothing_shifts_for_map(var_map, edges, mt, pt, rt_sel, var, weight, neff, smooth_sigmas, targets, recalibration_rt_sel)
+    return _write_ddt_smoothing_info(ddt_name, neff, shifts, info_name)
 
-def create_DDT_map_dict(mt, pt, rt_sel, var, weight, percents, cut_vals, ddt_name, smooth_sigmas=(), recalibration_rt_sel=None):
+def create_DDT_map_dict(mt, pt, rt_sel, var, weight, percents, cut_vals, ddt_name, smooth_sigmas=(), recalibration_rt_sel=None, smoothing_info_name=None):
     '''
     Creates a dictionary of DDT 2D maps for a range of cut_vals and background efficiencies (percents).
     Each DDT map is a 3D array of tagger thresholds binned in (mt/pt, pt, rt) space, where RT is a boolean array
@@ -1272,8 +1312,8 @@ def create_DDT_map_dict(mt, pt, rt_sel, var, weight, percents, cut_vals, ddt_nam
     - cut_vals: corresponding working point names (e.g. [0.1, 0.2, 0.3])
     - ddt_name: output filename for the JSON dictionary
     - smooth_sigmas: widths (bins) for which the information for on-the-fly smoothing (calculate_varDDT(smooth_sigma))
-      is stored in the metadata: N_eff per bin and, for each width and working point, one shift per RT slice. The
-      stored thresholds are the same with or without it.
+      is written to a separate file (smoothing_info_name, default ddt_smoothing_info_name(ddt_name)): N_eff per bin and,
+      for each width and working point, one shift per RT slice. The map file is the same with or without it.
     - recalibration_rt_sel: {sigma: RT slice of each event} if the RT selection applied with this map is smoothed on the
       fly too (default: rt_sel)
     '''
@@ -1299,16 +1339,15 @@ def create_DDT_map_dict(mt, pt, rt_sel, var, weight, percents, cut_vals, ddt_nam
         "sum_of_weight": float(np.sum(weight)),
         "efficiency_map": { str(cut_val): float(percent) for cut_val, percent in zip(cut_vals, percents) }
     }
-    if smooth_sigmas:
-        var_dict["metadata"]["neff"] = neff
-        var_dict["metadata"]["smoothing_shifts"] = shifts
 
     if ddt_name is None:
         ddt_name = 'ddt_' + str(var) + '_' + datetime.now().strftime('%Y%m%d') + '.json'
     with open(ddt_name, 'w') as f:
         json.dump(var_dict, f, cls=NumpyArrayEncoder)
+    if smooth_sigmas:
+        _write_ddt_smoothing_info(ddt_name, neff, shifts, smoothing_info_name)
 
-def calculate_varDDT(mt, pt, rt_sel, var, cut_val, ddt_name, smear=1.0, smooth_sigma=0.0):
+def calculate_varDDT(mt, pt, rt_sel, var, cut_val, ddt_name, smear=1.0, smooth_sigma=0.0, smoothing_info=None):
     '''
     Applies a DDT transformation to 'var' using a DDT map in (mt, pt) space.
 
@@ -1320,8 +1359,9 @@ def calculate_varDDT(mt, pt, rt_sel, var, cut_val, ddt_name, smear=1.0, smooth_s
     - ddt_name: path to JSON file containing the DDT map
     - smear: width (bins) of the Gaussian smear applied to the map
     - smooth_sigma: if > 0, the N_eff-weighted smoothing of this width (bins) is applied to the stored map on the fly
-      instead of the Gaussian smear (regularize_ddt_map plus the stored per-slice shifts). The map file must carry the
-      information for this width (create_DDT_map_dict(smooth_sigmas) or add_ddt_smoothing_info); the file is not changed.
+      instead of the Gaussian smear (regularize_ddt_map plus the stored per-slice shifts). It needs the smoothing
+      information of the map for this width (create_DDT_map_dict(smooth_sigmas) or add_ddt_smoothing_info), read from
+      smoothing_info (default: ddt_smoothing_info_name(ddt_name)). The map file is not changed.
 
     Returns:
     - varDDT: array of DDT-transformed tagger values
@@ -1345,12 +1385,12 @@ def calculate_varDDT(mt, pt, rt_sel, var, cut_val, ddt_name, smear=1.0, smooth_s
 
     if smooth_sigma > 0:
         # N_eff-weighted smoothing on the fly; the stored map is not changed
-        meta = var_dict.get("metadata", {})
-        shifts = meta.get("smoothing_shifts", {}).get(str(cut_val), {}).get(str(float(smooth_sigma)))
-        if "neff" not in meta or shifts is None:
-            raise KeyError(f"{ddt_name} has no smoothing information for cut value {cut_val} and smooth_sigma {smooth_sigma}: "
-                           "add it with add_ddt_smoothing_info (apply_DDT.py --smooth_sigmas)")
-        var_map_smooth = smooth_ddt_map(var_map, np.array(meta["neff"]), smooth_sigma, shifts)
+        info = load_ddt_smoothing_info(ddt_name, smoothing_info)
+        shifts = info["smoothing_shifts"].get(str(cut_val), {}).get(str(float(smooth_sigma)))
+        if shifts is None:
+            raise KeyError(f"The smoothing information of {ddt_name} has no shifts for cut value {cut_val} and smooth_sigma "
+                           f"{smooth_sigma}: add them with add_ddt_smoothing_info (apply_DDT.py --smooth_sigmas)")
+        var_map_smooth = smooth_ddt_map(var_map, np.array(info["neff"]), smooth_sigma, shifts)
     else:
         # Applying a smearing on the DDT map. Explicitly disabling the smearing on the RT axis
         var_map_smooth = gaussian_filter(var_map, (smear, smear, 0.0))
@@ -1390,9 +1430,15 @@ RT_DDT_FILE = 'models/rt_ddt_map_ANv6_3d.json'
 RT_DDT_SMEAR = 0.2
 NO_RT_DDT_SMEAR = 0.5
 # Width (bins) of the N_eff-weighted on-the-fly smoothing of all DDT maps in the selections below (calculate_varDDT
-# smooth_sigma); 0 = off, the Gaussian smears above apply. The map files must carry the smoothing information for this
-# width (apply_DDT.py --smooth_sigmas, add_ddt_smoothing_info).
+# smooth_sigma); 0 = off, the Gaussian smears above apply. Each map needs its smoothing information for this width in
+# <map name>_smoothing.json next to it (apply_DDT.py --smooth_sigmas, add_ddt_smoothing_info); the maps are unchanged.
 DDT_SMOOTH_SIGMA = 0.0
+
+def check_if_ddt_map_exists(ddt_map_file, xrootd_url):
+    '''check_if_model_exists for a DDT map, and for its smoothing information if DDT_SMOOTH_SIGMA > 0'''
+    check_if_model_exists(ddt_map_file, xrootd_url)
+    if DDT_SMOOTH_SIGMA > 0:
+        check_if_model_exists(ddt_smoothing_info_name(ddt_map_file), xrootd_url)
 
 def apply_rt_signalregion(cols):
     cols = cols.select(cols.arrays['rt'] > SELECTION_RT_SIGNAL_REGION)
@@ -1400,7 +1446,7 @@ def apply_rt_signalregion(cols):
     return cols
 
 def _get_rt_ddt_val(cols, rt_ddt_map=RT_DDT_FILE, xrootd_url=RT_DDT_PATH):
-    check_if_model_exists(rt_ddt_map, xrootd_url)
+    check_if_ddt_map_exists(rt_ddt_map, xrootd_url)
     mT = cols.to_numpy(['mt']).ravel()
     pT = cols.to_numpy(['pt']).ravel()
     rT = cols.to_numpy(['rt']).ravel()
@@ -1419,7 +1465,7 @@ DDT_FILE_CUTBASED = 'models/cutbased_ddt_map_ANv6_3d.json'
 DDT_FILE_CUTBASED_RT_DDT = 'models/cutbased_ddt_map_withRT_ANv6_3d.json'
 
 def cutbased_ddt(cols, lumi, cut_val, ddt_map_file, xrootd_url):
-    check_if_model_exists(ddt_map_file, xrootd_url)
+    check_if_ddt_map_exists(ddt_map_file, xrootd_url)
     # Get features necessary to apply the DDT
     mT = cols.to_numpy(['mt']).ravel() # make one d ... don't ask why it's not
     pT = cols.to_numpy(['pt']).ravel()
@@ -1485,7 +1531,7 @@ def apply_antirtcutbased_ddt(cols, lumi, cut_val, ddt_map_file=DDT_FILE_CUTBASED
 
 def _calc_rtcutbased_ddt_val(cols, lumi, cut_val, rt_ddt_file, rt_cut_val, ddt_map_file, xrootd_url):
     # Calculating the cutbased DDT value, if the RT DDT file is provided, we we will compute the results with the double DDT method
-    check_if_model_exists(ddt_map_file, xrootd_url)
+    check_if_ddt_map_exists(ddt_map_file, xrootd_url)
     # Get features necessary to apply the DDT
     mT = cols.to_numpy(['mt']).ravel()
     pT = cols.to_numpy(['pt']).ravel()
@@ -1548,7 +1594,7 @@ DDT_FILE_BDTBASED='models/bdt_ddt_map_ANv6_3d.json'
 DDT_FILE_BDTBASED_RT_DDT='models/bdt_ddt_withRT_ANv6_3d.json'
 
 def apply_bdtbased(cols,wp,lumi,anti=False,model_file=bdt_model_file,ddt_map_file=DDT_FILE_BDTBASED, xrootd_url=DDT_PATH_BDTBASED):
-    check_if_model_exists(ddt_map_file, xrootd_url)
+    check_if_ddt_map_exists(ddt_map_file, xrootd_url)
     check_if_model_exists(model_file, xrootd_url)
 
     cols = apply_rt_signalregion(cols) if "_withRT_" not in ddt_map_file else apply_rt_signalregion_ddt(cols)
@@ -1571,7 +1617,7 @@ def apply_bdtbased(cols,wp,lumi,anti=False,model_file=bdt_model_file,ddt_map_fil
 
 def apply_antiloosebdt(cols,wp,lumi,rt_ddt_file=None,model_file=bdt_model_file,ddt_map_file=DDT_PATH_BDTBASED,xrootd_url=DDT_PATH_BDTBASED):
     # Running the BDT calculation. If the RT_DDT files is provided, the double DDT method will be used
-    check_if_model_exists(ddt_map_file, xrootd_url)
+    check_if_ddt_map_exists(ddt_map_file, xrootd_url)
     check_if_model_exists(model_file, xrootd_url)
 
     if len(cols)==0:

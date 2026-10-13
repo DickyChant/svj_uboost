@@ -53,7 +53,7 @@ def parse_arguments():
 
     parser.add_argument('--rt_sel', type=float, default=1.18, help='RT selection defining the signal region') # TODO: update to optimal value
     parser.add_argument('--rt_ddt_file', help='DDT map file for RT selection, leave none to use non DDT RT selection')
-    parser.add_argument('--smooth_sigmas', nargs='*', type=float, default=[], help='Store with the DDT map the information for N_eff-weighted on-the-fly smoothing (calculate_varDDT smooth_sigma) of these widths in bins; the stored thresholds are unchanged. If the map file exists, the information is added to it (same inputs and --rt_sel as when it was made). With --rt_ddt_file, that RT map must carry the same widths')
+    parser.add_argument('--smooth_sigmas', nargs='*', type=float, default=[], help='Write the information for N_eff-weighted on-the-fly smoothing (calculate_varDDT smooth_sigma) of these widths in bins to <map name>_smoothing.json next to the DDT map. The map file itself is never changed. If the map file exists, use the same inputs and --rt_sel as when it was made. With --rt_ddt_file, that RT map needs its smoothing information for the same widths')
 
     # The default value of 0.65 was the optimal cut value determined. If the training or selection changes,
     # the value should be adapted accordingly
@@ -205,9 +205,9 @@ def main():
         create_DDT_map_dict(mT, pT, rt_mask, primary_var, bkg_weight, bkg_percents, var_cuts, ddt_map_file,
                             smooth_sigmas=smooth_sigmas, recalibration_rt_sel=recalibration_rt_sel)
     elif smooth_sigmas:
-        print("Adding the on-the-fly smoothing information to the existing DDT map (thresholds unchanged)")
-        add_ddt_smoothing_info(ddt_map_file, mT, pT, rt_mask, primary_var, bkg_weight, smooth_sigmas, cut_vals=var_cuts,
-                               recalibration_rt_sel=recalibration_rt_sel)
+        info_name = add_ddt_smoothing_info(ddt_map_file, mT, pT, rt_mask, primary_var, bkg_weight, smooth_sigmas,
+                                           cut_vals=var_cuts, recalibration_rt_sel=recalibration_rt_sel)
+        print(f"Wrote the on-the-fly smoothing information of {ddt_map_file} to {info_name}; the map file is not changed")
     else: print("The DDT has already been calculated, please change the name if you want to remake the ddt map")
 
     # Load the dictionary from the json file

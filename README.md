@@ -191,12 +191,14 @@ no effect. At larger widths, bins without MC events (stored as 0) pull the thres
 
 `calculate_varDDT(..., smooth_sigma=<width in bins>)` instead smooths the stored map on the fly: the thresholds are
 smoothed in (mt/pt, pt) with the effective number of MC events of each bin as weight, ignoring empty bins, and each RT
-slice is then shifted by a stored constant that keeps its working point. The map file and its thresholds are never
-changed. It only needs two things that require the training MC, kept in its metadata: N_eff per bin, and the shift per
-RT slice for each width. `apply_DDT.py --smooth_sigmas <widths>` stores them when a map is created, or adds them to an
-existing map file, with the same inputs and `--rt_sel` as when it was made. Prepare the RT map first: with
-`--rt_ddt_file`, the shifts of the BDT/ECF map are computed with the RT selection smoothed the same way. For the
-selections in `common.py`, set `DDT_SMOOTH_SIGMA` (0 = off):
+slice is then shifted by a stored constant that keeps its working point. The map file is never changed. The smoothing
+needs two things that require the training MC: N_eff per bin, and the shift per RT slice for each width. They are kept
+in a separate file next to the map, `<map name>_smoothing.json`, which records the md5 of the map file it belongs to
+(a different map, or another version of it, raises an error). `apply_DDT.py --smooth_sigmas <widths>` writes this file
+when a map is created, or for an existing map, with the same inputs and `--rt_sel` as when the map was made. Prepare
+the RT map first: with `--rt_ddt_file`, the shifts of the BDT/ECF map are computed with the RT selection smoothed the
+same way. For the selections in `common.py`, set `DDT_SMOOTH_SIGMA` (0 = off); the smoothing files are fetched from
+EOS together with the maps:
 
 ```bash
 python apply_DDT.py --analysis_type RT --smooth_sigmas 1 2 --var_cuts 1.2 --ddt_map_file ./models/rt_ddt_map_ANv6_3d.json --bkg_files "root://cmseos.fnal.gov//store/user/lpcdarkqcd/boosted/skims_20241030_hadd/Summer20UL*/*.npz"
