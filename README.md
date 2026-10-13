@@ -176,6 +176,32 @@ python apply_DDT.py --analysis_type BDT-based --rt-sel 1.20 --rt_ddt_file ./mode
 
 A collection of all these commands can be found in the `./run_ddt_construct.sh` script
 
+#### Regularising the DDT maps
+
+Each map bin stores the weighted percentile of the background MC events in that bin. In sparsely populated bins this
+threshold carries the statistical fluctuation of the few MC events it was computed from, and the fluctuation is frozen
+into the selection. On the events used to build the map the efficiency is flat by construction, so the fluctuations
+do not show there; on any independent sample (data, or MC not used for the map) they appear as bin-to-bin structure in
+the pass/fail $m_T$ ratio. To see them, build the map on one half of the background MC and plot the pass/fail ratio
+on the other half.
+
+The smearing applied when the map is used (`smear` in `calculate_varDDT`, `RT_DDT_SMEAR`) does not address this. At the
+default width of 0.2 bins the neighbouring bins enter with a relative weight of exp(-1/(2*0.2^2)) ~ 4e-6, so it has no
+effect. At larger widths, bins without MC events (stored as 0) pull the thresholds of their neighbours towards zero.
+
+`--smooth_sigma <width in bins>` regularises each new map instead: the thresholds are smoothed in (mt/pt, pt) with
+the effective number of MC events of each bin as weight, ignoring empty bins, and each RT slice is then shifted back
+to its target efficiency. The map is stored in the usual format and is applied as before (the default smear of 0.2 has
+no effect on it). The BDT map has to be built with the same (regularised) RT map that is used in the selection. Its
+target efficiency is by default computed on the events passing that RT map, which differ slightly from those passing
+the current one. To keep the working point of the current maps, define it with the current RT map
+(`--target_rt_ddt_file`):
+
+```bash
+python apply_DDT.py --analysis_type RT --smooth_sigma <width> --ddt_map_file ./models/<rt_ddt_name>.json --bkg_files "root://cmseos.fnal.gov//store/user/lpcdarkqcd/boosted/skims_20241030_hadd/Summer20UL*/*.npz"
+python apply_DDT.py --analysis_type BDT-based --rt_sel 1.20 --rt_ddt_file ./models/<rt_ddt_name>.json --target_rt_ddt_file ./models/rt_ddt_map_ANv6_3d.json --smooth_sigma <width> --ddt_map_file models/<new_file_name>.json --bkg_files "root://cmseos.fnal.gov//store/user/lpcdarkqcd/boosted/skims_20241030_hadd/Summer20UL*/*.npz"
+```
+
 
 ### Overfitting check: Kolmogorov-Smirnov test
 

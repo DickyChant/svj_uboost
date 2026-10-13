@@ -53,6 +53,8 @@ def parse_arguments():
 
     parser.add_argument('--rt_sel', type=float, default=1.18, help='RT selection defining the signal region') # TODO: update to optimal value
     parser.add_argument('--rt_ddt_file', help='DDT map file for RT selection, leave none to use non DDT RT selection')
+    parser.add_argument('--smooth_sigma', type=float, default=0.0, help='If > 0: regularise the new DDT map (N_eff-weighted Gaussian smoothing of this width in bins, empty bins ignored) and recalibrate it to the target efficiency before storing it')
+    parser.add_argument('--target_rt_ddt_file', help='RT-DDT map file defining the working points: the target efficiencies are computed on events passing this RT selection (default: --rt_ddt_file). Pass the current RT-DDT map to keep its working points when building a map on a regularised RT-DDT map')
 
     # The default value of 0.65 was the optimal cut value determined. If the training or selection changes,
     # the value should be adapted accordingly
@@ -145,6 +147,8 @@ def main():
     ddt_map_file = args.ddt_map_file
     rt_sel = args.rt_sel
     rt_ddt_file = args.rt_ddt_file
+    smooth_sigma = args.smooth_sigma
+    target_rt_ddt_file = args.target_rt_ddt_file
     sig_bdt_cut = args.sig_bdt_cut
     var_cuts = args.var_cuts
     plots = args.plot
@@ -190,11 +194,13 @@ def main():
     # Only make the 2D DDT map if it doesn't exist.
     # Target efficiency is computed based on RT selection, while the DDT computation includes everything
     if not osp.exists(ddt_map_file):
+        # The working points can be defined with a different RT selection than the one the map is built on
+        target_rt_mask = rt_mask if target_rt_ddt_file is None else make_RT_selection(mT, pT, rT, rt_sel, target_rt_ddt_file)
         bkg_percents = []
-        bkg_sum = np.sum(bkg_weight[(primary_var > 0.0) & rt_mask])
+        bkg_sum = np.sum(bkg_weight[(primary_var > 0.0) & target_rt_mask])
         for cut_val in var_cuts:
-            bkg_percents.append((np.sum(bkg_weight[(primary_var > cut_val) & rt_mask]) / bkg_sum)*100)
-        create_DDT_map_dict(mT, pT, rt_mask, primary_var, bkg_weight, bkg_percents, var_cuts, ddt_map_file)
+            bkg_percents.append((np.sum(bkg_weight[(primary_var > cut_val) & target_rt_mask]) / bkg_sum)*100)
+        create_DDT_map_dict(mT, pT, rt_mask, primary_var, bkg_weight, bkg_percents, var_cuts, ddt_map_file, smooth_sigma=smooth_sigma)
     else: print("The DDT has already been calculated, please change the name if you want to remake the ddt map")
 
     # Load the dictionary from the json file

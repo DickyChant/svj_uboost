@@ -1069,10 +1069,12 @@ def weighted_percentile(x, w, percent):
 
     return upper_val *int_w + lower_val * (1-int_w)
 
-def varmap(mt, pt, rt_sel, var, weight, percent, cut_val):
+def varmap(mt, pt, rt_sel, var, weight, percent, cut_val, return_occupancy=False):
     '''
     3D map for DDT, defined in (mt/pt, pt, rt) space. The rt array in this case should be a boolean array indicating
     if the array passed or failed the RT selection.
+    With return_occupancy, the per-bin sum of weights and sum of squared weights are also returned (in the same
+    binning as the map), for computing the effective number of MC events in each bin.
     '''
 
     # Apply the rho-ddt window cuts to the data (still useful for pt/mt range)
@@ -1110,7 +1112,75 @@ def varmap(mt, pt, rt_sel, var, weight, percent, cut_val):
         for (i,j,k), result in zip(bin_list, result_list):
             VAR_map[i][j][k] = result
 
+    if return_occupancy:
+        # Same bin assignment as the percentile computation above (events on the upper edge are not assigned)
+        in_map = (mt_pt_bin_idx >= 0) & (mt_pt_bin_idx < VAR_map.shape[0]) & (pt_bin_idx >= 0) & (pt_bin_idx < VAR_map.shape[1]) & (rt_bin_idx >= 0) & (rt_bin_idx < VAR_map.shape[2])
+        flat_idx = np.ravel_multi_index((mt_pt_bin_idx[in_map], pt_bin_idx[in_map], rt_bin_idx[in_map]), VAR_map.shape)
+        w = WEIGHT[in_map].astype(np.float64)
+        sumw = np.bincount(flat_idx, weights=w, minlength=VAR_map.size).reshape(VAR_map.shape)
+        sumw2 = np.bincount(flat_idx, weights=w*w, minlength=VAR_map.size).reshape(VAR_map.shape)
+        return VAR_map, MT_PT_edges, PT_edges, RT_edges, sumw, sumw2
+
     return VAR_map, MT_PT_edges, PT_edges, RT_edges
+
+
+def regularize_ddt_map(var_map, sumw, sumw2, sigma):
+    '''
+    Smooths the DDT thresholds in (mt/pt, pt) with a Gaussian of width sigma (in bins), separately for each RT slice.
+    Each bin enters with its effective number of MC events, N_eff = (sum w)^2 / (sum w^2), as weight (normalised
+    convolution), so sparsely populated bins are pulled towards their well populated neighbours rather than the other
+    way around. Bins without MC events (stored as 0) do not contribute and do not dilute their neighbours, unlike in
+    gaussian_filter(var_map) at lookup, where they enter as thresholds of 0; within reach of the kernel they receive
+    the weighted average of their populated neighbours.
+
+    Inputs:
+    - var_map: 3D threshold map from varmap
+    - sumw, sumw2: per-bin sum of weights and of squared weights (varmap with return_occupancy=True)
+    - sigma: Gaussian width in units of bins (same for the mt/pt and pt axes)
+    '''
+    neff = np.where(sumw2 > 0, sumw**2 / np.maximum(sumw2, 1e-300), 0.0)
+    smoothed = np.zeros(var_map.shape)
+    for k in range(var_map.shape[2]):
+        num = gaussian_filter(var_map[:, :, k] * neff[:, :, k], sigma)
+        den = gaussian_filter(neff[:, :, k], sigma)
+        smoothed[:, :, k] = np.where(den > 1e-12, num / np.maximum(den, 1e-300), 0.0)
+    return smoothed
+
+
+def recalibrate_ddt_map(var_map, mt, pt, rt_sel, var, weight, edges, percent):
+    '''
+    Shifts the thresholds of each RT slice by a common offset, so that the weighted fraction of events inside the DDT
+    window that pass (var above the threshold of their bin) is again `percent`. Smoothing changes the overall
+    efficiency slightly where the threshold surface is curved; this keeps the working point fixed.
+
+    Inputs:
+    - var_map: 3D threshold map (e.g. from regularize_ddt_map)
+    - mt, pt, rt_sel, var, weight: the events used to create the map (as in varmap)
+    - edges: (MT_PT_edges, PT_edges, RT_edges) of the map
+    - percent: target efficiency in percent
+    '''
+    MT_PT_edges, PT_edges, RT_edges = edges
+    cuts = ddt_windowcuts(mt, pt)
+    # Bin lookup as in calculate_varDDT
+    pt_bin = np.clip(np.digitize(pt[cuts], PT_edges) - 1, 0, len(PT_edges) - 2)
+    mt_pt_bin = np.clip(np.digitize(mt[cuts]/pt[cuts], MT_PT_edges) - 1, 0, len(MT_PT_edges) - 2)
+    rt_bin = np.digitize(rt_sel[cuts], RT_edges) - 1
+    VAR = var[cuts]
+    WEIGHT = weight[cuts]
+
+    recalibrated = var_map.copy()
+    for k in range(var_map.shape[2]):
+        in_slice = rt_bin == k
+        if not np.any(in_slice):
+            continue
+        x = VAR[in_slice].astype(np.float64) - var_map[mt_pt_bin[in_slice], pt_bin[in_slice], k]
+        w = WEIGHT[in_slice].astype(np.float64)
+        order = np.argsort(x)
+        cumw = np.cumsum(w[order]) / np.sum(w)
+        shift = x[order][min(np.searchsorted(cumw, 1 - percent/100), len(x) - 1)]
+        filled = recalibrated[:, :, k] != 0
+        recalibrated[:, :, k][filled] += shift
+    return recalibrated
 
 
 # Class that converts numpy arrays into list so they can be easily stored in json files
@@ -1121,7 +1191,7 @@ class NumpyArrayEncoder(json.JSONEncoder):
             return obj.tolist()
         return super(NumpyArrayEncoder, self).default(obj)
 
-def create_DDT_map_dict(mt, pt, rt_sel, var, weight, percents, cut_vals, ddt_name):
+def create_DDT_map_dict(mt, pt, rt_sel, var, weight, percents, cut_vals, ddt_name, smooth_sigma=0.0):
     '''
     Creates a dictionary of DDT 2D maps for a range of cut_vals and background efficiencies (percents).
     Each DDT map is a 3D array of tagger thresholds binned in (mt/pt, pt, rt) space, where RT is a boolean array
@@ -1136,6 +1206,10 @@ def create_DDT_map_dict(mt, pt, rt_sel, var, weight, percents, cut_vals, ddt_nam
     - percents: list of background efficiencies (e.g. [10, 20, 30])
     - cut_vals: corresponding working point names (e.g. [0.1, 0.2, 0.3])
     - ddt_name: output filename for the JSON dictionary
+    - smooth_sigma: if > 0, each map is regularised (regularize_ddt_map, Gaussian width in bins) and recalibrated to
+      its target efficiency (recalibrate_ddt_map) before it is stored. The stored map is then already smooth and
+      should be applied without additional smearing (smear=0 in calculate_varDDT; 0.2 is numerically equivalent).
+      The default 0 stores the per-bin percentiles as before.
     '''
     cuts = ddt_windowcuts(mt, pt)
 
@@ -1143,14 +1217,20 @@ def create_DDT_map_dict(mt, pt, rt_sel, var, weight, percents, cut_vals, ddt_nam
 
     for cut_val, percent in zip(cut_vals, percents):
         print(f"Creating DDT 2D map for cut value {cut_val}, efficiency {percent}%")
-        var_map, MT_PT_edges, PT_edges, RT_edges = varmap(mt, pt, rt_sel, var, weight, percent, cut_val)
+        if smooth_sigma > 0:
+            var_map, MT_PT_edges, PT_edges, RT_edges, sumw, sumw2 = varmap(mt, pt, rt_sel, var, weight, percent, cut_val, return_occupancy=True)
+            var_map = regularize_ddt_map(var_map, sumw, sumw2, smooth_sigma)
+            var_map = recalibrate_ddt_map(var_map, mt, pt, rt_sel, var, weight, (MT_PT_edges, PT_edges, RT_edges), percent)
+        else:
+            var_map, MT_PT_edges, PT_edges, RT_edges = varmap(mt, pt, rt_sel, var, weight, percent, cut_val)
         var_dict[str(cut_val)] = (var_map.tolist(), MT_PT_edges.tolist(), PT_edges.tolist(), RT_edges)
 
     # Adding some generation informations
     var_dict["metadata"] = {
         "event_count": len(weight),
         "sum_of_weight": float(np.sum(weight)),
-        "efficiency_map": { str(cut_val): float(percent) for cut_val, percent in zip(cut_vals, percents) }
+        "efficiency_map": { str(cut_val): float(percent) for cut_val, percent in zip(cut_vals, percents) },
+        "smooth_sigma": float(smooth_sigma),
     }
 
     if ddt_name is None:
