@@ -146,7 +146,7 @@ def plot_heldout(key, name, samples, spans, mtmin, mtmax, outdir, highlight=None
         for i, (sp, p) in enumerate(preds):
             lw = 3 if sp == highlight else 1.6
             ax.plot(x[window], p[window], color=cmap(0.35 + 0.65 * i / max(1, len(preds) - 1)), lw=lw,
-                    label=f'span {sp:g}, score {sc[str(sp)] / best:.3f}')
+                    label=f'span {sp:g}' + (' (chosen)' if sp == highlight else '') + f', score {sc[str(sp)] / best:.3f}')
         lo = min(np.percentile(r_o[m], 5), min(p[window].min() for _, p in preds))
         hi = max(np.percentile(r_o[m], 95), max(p[window].max() for _, p in preds))
         pad = max(0.01, 0.3 * (hi - lo))
@@ -204,9 +204,11 @@ def choose_span(rel, spans, tolerance, span_max):
     return min(reached[0], span_max)
 
 
-def plot(summary, spans, outdir):
+def plot(summary, spans, outdir, chosen=None, rule=''):
+    """per selection: summed held-out score / best vs span for each systematic; the chosen span (if given) is circled"""
     plt, hep = cms_style()
     os.makedirs(outdir, exist_ok=True)
+    chosen = chosen or {}
     for sel in sorted({k.split('|')[0] for k in summary}):
         fig, ax = plt.subplots(figsize=(8, 6))
         cols = iter(plt.get_cmap('tab10').colors)   # one distinct colour per systematic (the CMS cycle has fewer)
@@ -214,12 +216,16 @@ def plot(summary, spans, outdir):
             s, syst = k.split('|')
             if s != sel:
                 continue
-            ax.plot(spans, [rel[str(x)] for x in spans], marker='o', lw=2.5 if syst == 'all' else 1.2,
-                    color='black' if syst == 'all' else next(cols),
-                    label=f"{syst} (none {rel['none']:.2f}, flat {rel['flat']:.2f})")
+            col = 'black' if syst == 'all' else next(cols)
+            ax.plot(spans, [rel[str(x)] for x in spans], marker='o', lw=2.5 if syst == 'all' else 1.2, color=col,
+                    label=f"{syst}" + (f": chosen {chosen[k]:g}" if k in chosen else '')
+                          + f" (none {rel['none']:.2f}, flat {rel['flat']:.2f})")
+            if str(chosen.get(k)) in rel:
+                ax.plot([chosen[k]], [rel[str(chosen[k])]], marker='o', ms=13, mfc='none', mec=col, mew=2, ls='none')
         ax.set_xlabel('ratio span')
         ax.set_ylabel('held-out score / best')
-        ax.text(0.97, 0.95, f'sel-{sel}', transform=ax.transAxes, ha='right', va='top', fontsize=12)
+        ax.text(0.97, 0.95, f'sel-{sel}' + (f'\nopen circle: chosen span ({rule})' if chosen else ''),
+                transform=ax.transAxes, ha='right', va='top', fontsize=11)
         cms_label(hep, ax)
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=2, frameon=False, fontsize=9)
         fig.savefig(osp.join(outdir, f'ratio_span_cv_{sel}.png'), bbox_inches='tight')
@@ -280,7 +286,8 @@ def main():
     for k in sorted(summary):
         print(f'{k:40s}' + ''.join(f'{summary[k][c]:8.3f}' for c in candidates) + f'{chosen[k]:8g}')
     if args.plot:
-        plot(summary, args.spans, args.plot)
+        rule = (f'tolerance {args.tolerance:g}, ' if args.tolerance else 'smallest best span, ') + f'cap {args.span_max:g}'
+        plot(summary, args.spans, args.plot, chosen, rule)
     if args.plot_heldout:
         pat = re.compile(args.plot_match or '$^')
         for key, name, samples, *_ in tasks:
