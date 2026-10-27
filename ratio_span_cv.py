@@ -1,4 +1,4 @@
-"""
+r"""
 Cross-validation of the span of the signal-systematic ratio smoothing (build_datacard.py smooth_shapes --ratio-span).
 
 The per-year signal histograms written by build_datacard.py (<process>_sel-<selection>_year-<year>_mt.json) are
