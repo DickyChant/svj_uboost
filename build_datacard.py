@@ -673,11 +673,28 @@ def smooth_shapes():
     ratio_span = common.pull_arg('--ratio-span', type=float, default=0.,
         help="signal systematics: smooth the ratio variation/central (LOESS with this span) and apply it to the smoothed "
              "central, instead of smoothing each variation separately (0: off)").ratio_span
+    ratio_span_file = common.pull_arg('--ratio-span-file', type=str, default=None,
+        help="output of ratio_span_cv.py: use its chosen span per selection and systematic for the ratio smoothing "
+             "(--ratio-span, if > 0, is the fallback for systematics not in the file)").ratio_span_file
     json_files = common.pull_arg('jsonfiles', nargs='+', type=str).jsonfiles
 
+    ratio_spans = None
+    if ratio_span_file is not None:
+        with open(ratio_span_file) as f:
+            ratio_spans = json.load(f)['chosen_span']
     with common.mp_pool() as p:
-        args = [(span_val, span_min, span_max, simple, leak_tol, min_run, gcv_tol, do_opt, default, target, debug, var, save, mtmin, mtmax, norm, f, ratio_span) for f in json_files]
+        args = [(span_val, span_min, span_max, simple, leak_tol, min_run, gcv_tol, do_opt, default, target, debug, var, save, mtmin, mtmax, norm, f, ratio_span, ratio_spans) for f in json_files]
         p.starmap(smooth_shape_single, args)
+
+
+def get_ratio_span(ratio_spans, selection, var, default_span):
+    """span for the ratio smoothing of variation var (e.g. jec2018_up) in this selection: the span chosen by
+    ratio_span_cv.py for its systematic (year suffix dropped: jec2018 -> jec), else default_span"""
+    syst = re.sub(r'\d{4}$', '', var.rsplit('_', 1)[0])
+    span = (ratio_spans or {}).get(f'{selection}|{syst}', default_span)
+    if not span > 0:
+        raise ValueError(f"no ratio span for {selection}|{syst}: not in --ratio-span-file and no --ratio-span fallback")
+    return span
 
 
 def smooth_ratio_to_central(hist, raw_central, central_smooth, span):
@@ -697,7 +714,7 @@ def smooth_ratio_to_central(hist, raw_central, central_smooth, span):
     return out
 
 
-def smooth_shape_single(span_val, span_min, span_max, simple, leak_tol, min_run, gcv_tol, do_opt, default, target, debug, var, save , mtmin, mtmax, norm, json_file, ratio_span=0.):
+def smooth_shape_single(span_val, span_min, span_max, simple, leak_tol, min_run, gcv_tol, do_opt, default, target, debug, var, save , mtmin, mtmax, norm, json_file, ratio_span=0., ratio_spans=None):
     # keep only regions with at least min_run consecutive True values
     # (avoid one-point outliers)
     def consec_true_mask(mask, min_run):
@@ -758,12 +775,13 @@ def smooth_shape_single(span_val, span_min, span_max, simple, leak_tol, min_run,
         common.logger.info(f'{var} integral: {hyield}')
         meta = hist.metadata
 
-        if ratio_span > 0 and var != default and h_default.metadata["sample_type"] == "sig":
+        if (ratio_span > 0 or ratio_spans is not None) and var != default and h_default.metadata["sample_type"] == "sig":
             if central_uncut is None:
                 raise ValueError("--ratio-span needs the normalised central template smoothed before the variations "
                                  "(not available with --unnorm, --var, or a --target other than the central)")
-            hsmooth = smooth_ratio_to_central(hist, mths[default], central_uncut, ratio_span).cut(**cut_args)
-            meta["ratio_span"] = ratio_span
+            rspan = get_ratio_span(ratio_spans, h_default.metadata["selection"], var, ratio_span)
+            hsmooth = smooth_ratio_to_central(hist, mths[default], central_uncut, rspan).cut(**cut_args)
+            meta["ratio_span"] = rspan
             hsmooth.metadata = meta
             mths_new[var] = hsmooth
             continue

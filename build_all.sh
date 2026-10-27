@@ -46,5 +46,7 @@ for sel in ${actual_sels[@]}; do
     # SIG: build w/ extended mt range for smoothing
     python3 build_datacard.py build_all_histograms ${sel} "${skim_dir}/Private3D*/*pythia8.npz" ${mt_wide} ${mt_bin}
     python3 build_datacard.py merge_histograms ${sel} hists_${hists_date} --cat sig
-    python3 build_datacard.py smooth_shapes --optimize 1000 --target central ${mt_reg} merged_${hists_date}/SVJ_*_sel-${sel}_*
+    # span of the ratio smoothing per systematic: smallest span with the best held-out score across the years, capped at 0.5
+    python3 ratio_span_cv.py hists_${hists_date}/SVJ_*_sel-${sel}_year-*_mt.json --span-max 0.5 --out merged_${hists_date}/ratio_span_sel-${sel}.json
+    python3 build_datacard.py smooth_shapes --optimize 1000 --target central ${mt_reg} --ratio-span-file merged_${hists_date}/ratio_span_sel-${sel}.json merged_${hists_date}/SVJ_*_sel-${sel}_*
 done

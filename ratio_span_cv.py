@@ -22,8 +22,11 @@ Year-specific systematics (e.g. jec2016) are scored under their generic name (je
 
 Usage:
     python ratio_span_cv.py hists/SVJ_*_year-*_mt.json [--spans 0.1 0.2 0.3 0.4 0.5 0.7 1.0] [--mtmin 180]
-        [--mtmax 650] [--years 2016 2017 2018PRE] [--out ratio_span_cv.json] [--plot plotdir]
-Prints, per selection and systematic, the summed score of each candidate relative to the best one.
+        [--mtmax 650] [--years 2016 2017 2018PRE] [--tolerance 0] [--span-max 0.5] [--out ratio_span_cv.json]
+        [--plot plotdir]
+Prints, per selection and systematic, the summed score of each candidate relative to the best one, and the chosen
+span: the smallest span whose summed score reaches the best span's (within --tolerance, default 0: the best span
+itself), capped at --span-max: wider spans than the cap are not used even when they score best.
 """
 import os, os.path as osp, sys, json, re, argparse
 from collections import defaultdict
@@ -131,6 +134,13 @@ def summarise(templates, candidates):
     return out
 
 
+def choose_span(rel, spans, tolerance, span_max):
+    """smallest span whose score is within (1 + tolerance) of the best span's, capped at span_max"""
+    best = min(rel[str(s)] for s in spans)
+    reached = [s for s in sorted(spans) if rel[str(s)] <= best * (1 + tolerance)]
+    return min(reached[0], span_max)
+
+
 def plot(summary, spans, outdir):
     import matplotlib
     matplotlib.use('Agg')
@@ -162,6 +172,9 @@ def main():
     ap.add_argument('--mtmax', type=float, default=650., help='upper edge of the scored range (fit range)')
     ap.add_argument('--years', nargs='+', default=None,
                     help='independent samples to use (default: all found except 2018POST, see above)')
+    ap.add_argument('--tolerance', type=float, default=0.,
+                    help='relative score difference to the best span that still counts as optimal')
+    ap.add_argument('--span-max', type=float, default=0.5, help='upper limit of the chosen span')
     ap.add_argument('--out', default='ratio_span_cv.json')
     ap.add_argument('--plot', default=None, help='directory for a summary plot per selection')
     args = ap.parse_args()
@@ -189,15 +202,17 @@ def main():
 
     candidates = [str(s) for s in args.spans] + ['none', 'flat']
     summary = summarise(templates, candidates)
+    chosen = {k: choose_span(rel, args.spans, args.tolerance, args.span_max) for k, rel in summary.items()}
     with open(args.out, 'w') as f:
-        json.dump({'meta': {'samples': sorted(years), 'spans': args.spans, 'range': [args.mtmin, args.mtmax]},
-                   'summary': summary,
+        json.dump({'meta': {'samples': sorted(years), 'spans': args.spans, 'range': [args.mtmin, args.mtmax],
+                            'tolerance': args.tolerance, 'span_max': args.span_max},
+                   'summary': summary, 'chosen_span': chosen,
                    'templates': {'|'.join(k): {'scores': s, 'nbins': n} for k, (s, n) in templates.items()}},
                   f, indent=1)
 
-    print(f"{'selection|systematic':40s}" + ''.join(f'{c:>8s}' for c in candidates))
+    print(f"{'selection|systematic':40s}" + ''.join(f'{c:>8s}' for c in candidates) + f"{'chosen':>8s}")
     for k in sorted(summary):
-        print(f'{k:40s}' + ''.join(f'{summary[k][c]:8.3f}' for c in candidates))
+        print(f'{k:40s}' + ''.join(f'{summary[k][c]:8.3f}' for c in candidates) + f'{chosen[k]:8g}')
     if args.plot:
         plot(summary, args.spans, args.plot)
 
