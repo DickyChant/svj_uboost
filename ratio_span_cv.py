@@ -23,7 +23,7 @@ Year-specific systematics (e.g. jec2016) are scored under their generic name (je
 Usage:
     python ratio_span_cv.py hists/SVJ_*_year-*_mt.json [--spans 0.1 0.2 0.3 0.4 0.5 0.7 1.0] [--mtmin 180]
         [--mtmax 650] [--years 2016 2017 2018PRE] [--tolerance 0] [--span-max 0.5] [--out ratio_span_cv.json]
-        [--plot plotdir] [--plot-heldout dir --plot-match 'mMed-350.*\|jes_up']
+        [--plot plotdir] [--plot-heldout dir --plot-match 'mMed-350.*\|jes_up'] [--plot-formats png pdf]
 Prints, per selection and systematic, the summed score of each candidate relative to the best one, and the chosen
 span: the smallest span whose summed score reaches the best span's (within --tolerance, default 0: the best span
 itself), capped at --span-max: wider spans than the cap are not used even when they score best.
@@ -115,7 +115,7 @@ def score_template(samples, name, spans, mtmin, mtmax):
     return scores, nbins
 
 
-def plot_heldout(key, name, samples, spans, mtmin, mtmax, outdir, highlight=None):
+def plot_heldout(key, name, samples, spans, mtmin, mtmax, outdir, highlight=None, formats=('png',)):
     """one plot per fold: the training samples' raw ratio, the held-out sample's raw ratio, the smoothed ratio at each
     span (smooth_ratio_to_central) and the flat ratio, with each entry's held-out score relative to the best entry"""
     plt, hep = cms_style()
@@ -158,7 +158,8 @@ def plot_heldout(key, name, samples, spans, mtmin, mtmax, outdir, highlight=None
                 ha='left', va='top', fontsize=9, bbox=dict(facecolor='white', edgecolor='none', alpha=1))
         cms_label(hep, ax)
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2, frameon=False, fontsize=9)
-        fig.savefig(osp.join(outdir, f'heldout_{key[0]}_sel-{key[1]}_{name}_ho{held}.png'), bbox_inches='tight')
+        for ext in formats:
+            fig.savefig(osp.join(outdir, f'heldout_{key[0]}_sel-{key[1]}_{name}_ho{held}.{ext}'), bbox_inches='tight')
         plt.close(fig)
 
 
@@ -204,7 +205,7 @@ def choose_span(rel, spans, tolerance, span_max):
     return min(reached[0], span_max)
 
 
-def plot(summary, spans, outdir, chosen=None, rule=''):
+def plot(summary, spans, outdir, chosen=None, rule='', formats=('png',)):
     """per selection: summed held-out score / best vs span for each systematic; the chosen span (if given) is circled"""
     plt, hep = cms_style()
     os.makedirs(outdir, exist_ok=True)
@@ -228,7 +229,8 @@ def plot(summary, spans, outdir, chosen=None, rule=''):
                 transform=ax.transAxes, ha='right', va='top', fontsize=11)
         cms_label(hep, ax)
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=2, frameon=False, fontsize=9)
-        fig.savefig(osp.join(outdir, f'ratio_span_cv_{sel}.png'), bbox_inches='tight')
+        for ext in formats:
+            fig.savefig(osp.join(outdir, f'ratio_span_cv_{sel}.{ext}'), bbox_inches='tight')
         plt.close(fig)
 
 
@@ -247,6 +249,7 @@ def main():
     ap.add_argument('--plot', default=None, help='directory for a summary plot per selection')
     ap.add_argument('--plot-heldout', default=None,
                     help='directory for per-fold plots of single templates (selected with --plot-match)')
+    ap.add_argument('--plot-formats', nargs='+', default=['png'], help='formats of the plots, e.g. png pdf')
     ap.add_argument('--plot-match', default=None,
                     help='regular expression on "<process>|<selection>|<variation>" for --plot-heldout')
     args = ap.parse_args()
@@ -287,13 +290,13 @@ def main():
         print(f'{k:40s}' + ''.join(f'{summary[k][c]:8.3f}' for c in candidates) + f'{chosen[k]:8g}')
     if args.plot:
         rule = (f'tolerance {args.tolerance:g}, ' if args.tolerance else 'smallest best span, ') + f'cap {args.span_max:g}'
-        plot(summary, args.spans, args.plot, chosen, rule)
+        plot(summary, args.spans, args.plot, chosen, rule, args.plot_formats)
     if args.plot_heldout:
         pat = re.compile(args.plot_match or '$^')
         for key, name, samples, *_ in tasks:
             if pat.search(f'{key[0]}|{key[1]}|{name}'):
                 plot_heldout(key, name, samples, args.spans, args.mtmin, args.mtmax, args.plot_heldout,
-                             highlight=get_ratio_span(chosen, key[1], name, args.span_max))
+                             highlight=get_ratio_span(chosen, key[1], name, args.span_max), formats=args.plot_formats)
 
 
 if __name__ == '__main__':
