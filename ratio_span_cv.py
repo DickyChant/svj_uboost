@@ -118,10 +118,7 @@ def score_template(samples, name, spans, mtmin, mtmax):
 def plot_heldout(key, name, samples, spans, mtmin, mtmax, outdir, highlight=None):
     """one plot per fold: the training samples' raw ratio, the held-out sample's raw ratio, the smoothed ratio at each
     span (smooth_ratio_to_central) and the flat ratio, with each entry's held-out score relative to the best entry"""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    plt.rcdefaults()
+    plt, hep = cms_style()
     os.makedirs(outdir, exist_ok=True)
     years = sorted(samples)
     x = samples[years[0]]['central'].binning
@@ -155,9 +152,11 @@ def plot_heldout(key, name, samples, spans, mtmin, mtmax, outdir, highlight=None
         pad = max(0.01, 0.3 * (hi - lo))
         ax.set_ylim(lo - pad, hi + pad)
         ax.set_xlim(mtmin, mtmax)
-        ax.set_xlabel('mT [GeV]')
+        ax.set_xlabel(r'$m_\mathrm{T}$ [GeV]')
         ax.set_ylabel(f'{name} / central')
-        ax.set_title(f'{key[0]}\nsel-{key[1]}, {name}, held out {held}', fontsize=9)
+        ax.text(0.03, 0.96, f'{key[0][:60]}\nsel-{key[1]}, {name}, held out {held}', transform=ax.transAxes,
+                ha='left', va='top', fontsize=9, bbox=dict(facecolor='white', edgecolor='none', alpha=1))
+        cms_label(hep, ax)
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2, frameon=False, fontsize=9)
         fig.savefig(osp.join(outdir, f'heldout_{key[0]}_sel-{key[1]}_{name}_ho{held}.png'), bbox_inches='tight')
         plt.close(fig)
@@ -182,6 +181,22 @@ def summarise(templates, candidates):
     return out
 
 
+def cms_style():
+    """CMS style (mplhep, as apply_DDT.py) without LaTeX; returns pyplot and mplhep"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import mplhep as hep
+    plt.style.use(hep.style.CMS)
+    plt.rcParams.update({'text.usetex': False, 'font.size': 15, 'axes.labelsize': 15, 'legend.fontsize': 10,
+                         'xtick.labelsize': 12, 'ytick.labelsize': 12})
+    return plt, hep
+
+
+def cms_label(hep, ax):
+    hep.cms.label('Preliminary', data=False, com=13, ax=ax, fontsize=12)
+
+
 def choose_span(rel, spans, tolerance, span_max):
     """smallest span whose score is within (1 + tolerance) of the best span's, capped at span_max"""
     best = min(rel[str(s)] for s in spans)
@@ -190,23 +205,22 @@ def choose_span(rel, spans, tolerance, span_max):
 
 
 def plot(summary, spans, outdir):
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
+    plt, hep = cms_style()
     os.makedirs(outdir, exist_ok=True)
-    plt.rcdefaults()   # plain matplotlib style (common's style needs LaTeX and its fonts)
     for sel in sorted({k.split('|')[0] for k in summary}):
         fig, ax = plt.subplots(figsize=(8, 6))
+        cols = iter(plt.get_cmap('tab10').colors)   # one distinct colour per systematic (the CMS cycle has fewer)
         for k, rel in sorted(summary.items()):
             s, syst = k.split('|')
             if s != sel:
                 continue
             ax.plot(spans, [rel[str(x)] for x in spans], marker='o', lw=2.5 if syst == 'all' else 1.2,
-                    color='black' if syst == 'all' else None,
+                    color='black' if syst == 'all' else next(cols),
                     label=f"{syst} (none {rel['none']:.2f}, flat {rel['flat']:.2f})")
         ax.set_xlabel('ratio span')
         ax.set_ylabel('held-out score / best')
-        ax.set_title(f'sel-{sel}')
+        ax.text(0.97, 0.95, f'sel-{sel}', transform=ax.transAxes, ha='right', va='top', fontsize=12)
+        cms_label(hep, ax)
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=2, frameon=False, fontsize=9)
         fig.savefig(osp.join(outdir, f'ratio_span_cv_{sel}.png'), bbox_inches='tight')
         plt.close(fig)

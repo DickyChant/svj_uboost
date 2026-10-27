@@ -16,6 +16,11 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import mplhep as hep
+
+plt.style.use(hep.style.CMS)   # as apply_DDT.py, without LaTeX
+plt.rcParams.update({'text.usetex': False, 'font.size': 15, 'axes.labelsize': 15, 'legend.fontsize': 10,
+                     'xtick.labelsize': 12, 'ytick.labelsize': 12})
 
 STYLES = ['--', '-', ':', '-.']
 
@@ -83,9 +88,11 @@ def main():
         rx.set_ylim(1 - spread, 1 + spread)
         ax.set_ylim(0, 1.25 * top)
         ax.set_ylabel('events / bin')
-        ax.set_title(f'{tag}\n{syst} up / down', fontsize=9)
+        ax.text(0.97, 0.95, f'{tag[:60]}\n{tag[60:]}\n{syst} up / down', transform=ax.transAxes, ha='right', va='top',
+                fontsize=9)
+        hep.cms.label('Preliminary', data=False, com=13, ax=ax, fontsize=12)
         rx.set_ylabel('/ smoothed central')
-        rx.set_xlabel('mT [GeV]')
+        rx.set_xlabel(r'$m_\mathrm{T}$ [GeV]')
         rx.set_xlim(args.mtmin, args.mtmax)
         h1, l1 = ax.get_legend_handles_labels()
         h2, l2 = rx.get_legend_handles_labels()
