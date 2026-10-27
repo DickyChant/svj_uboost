@@ -23,7 +23,7 @@ Year-specific systematics (e.g. jec2016) are scored under their generic name (je
 Usage:
     python ratio_span_cv.py hists/SVJ_*_year-*_mt.json [--spans 0.1 0.2 0.3 0.4 0.5 0.7 1.0] [--mtmin 180]
         [--mtmax 650] [--years 2016 2017 2018PRE] [--tolerance 0] [--span-max 0.5] [--out ratio_span_cv.json]
-        [--plot plotdir]
+        [--plot plotdir] [--plot-heldout dir --plot-match 'mMed-350.*\|jes_up']
 Prints, per selection and systematic, the summed score of each candidate relative to the best one, and the chosen
 span: the smallest span whose summed score reaches the best span's (within --tolerance, default 0: the best span
 itself), capped at --span-max: wider spans than the cap are not used even when they score best.
@@ -34,7 +34,7 @@ from collections import defaultdict
 import numpy as np
 
 import common
-from build_datacard import smooth_ratio_to_central
+from build_datacard import smooth_ratio_to_central, get_ratio_span
 
 FNAME = re.compile(r'^(?P<process>.*)_sel-(?P<sel>.*)_year-(?P<year>\w+)_mt\.json$')
 YEARLY = re.compile(r'^(?P<name>[a-z]+)(?P<year>\d{4})_(?P<dir>up|down)$')
@@ -115,6 +115,54 @@ def score_template(samples, name, spans, mtmin, mtmax):
     return scores, nbins
 
 
+def plot_heldout(key, name, samples, spans, mtmin, mtmax, outdir, highlight=None):
+    """one plot per fold: the training samples' raw ratio, the held-out sample's raw ratio, the smoothed ratio at each
+    span (smooth_ratio_to_central) and the flat ratio, with each entry's held-out score relative to the best entry"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcdefaults()
+    os.makedirs(outdir, exist_ok=True)
+    years = sorted(samples)
+    x = samples[years[0]]['central'].binning
+    x = (x[:-1] + x[1:]) / 2
+    window = (x > mtmin) & (x < mtmax)
+    cmap = plt.get_cmap('Blues')
+    for held in years:
+        train = [y for y in years if y != held]
+        c = sum((samples[y]['central'] for y in train[1:]), samples[train[0]]['central'])
+        v = sum((samples[y][name] for y in train[1:]), samples[train[0]][name])
+        rt, et = raw_ratio(v, c)
+        r_o, e_o = raw_ratio(samples[held][name], samples[held]['central'])
+        m = window & (c.vals > 0) & (samples[held]['central'].vals > 0)
+        score = lambda pred: float(np.sum((r_o[m] - pred[m])**2 / e_o[m]**2))
+        flat = v.vals[window].sum() / c.vals[window].sum()
+        preds = [(sp, smooth_ratio_to_central(v, c, unit(c), sp).vals) for sp in spans]
+        sc = {**{str(sp): score(p) for sp, p in preds}, 'flat': score(np.full(len(x), flat)), 'none': score(rt)}
+        best = min(sc.values())
+        fig, ax = plt.subplots(figsize=(8, 7.5))
+        ax.errorbar(x[m] + 1.5, r_o[m], e_o[m], fmt='s', color='#c0392b', ms=4, lw=1, alpha=0.8,
+                    label=f'held out ({held}) raw ratio')
+        ax.errorbar(x[m] - 1.5, rt[m], et[m], fmt='o', color='black', ms=3, lw=1, alpha=0.6,
+                    label=f'training ({" + ".join(train)}) raw ratio, score {sc["none"] / best:.3f}')
+        ax.axhline(flat, color='grey', ls='--', lw=1.5, label=f'flat, score {sc["flat"] / best:.3f}')
+        for i, (sp, p) in enumerate(preds):
+            lw = 3 if sp == highlight else 1.6
+            ax.plot(x[window], p[window], color=cmap(0.35 + 0.65 * i / max(1, len(preds) - 1)), lw=lw,
+                    label=f'span {sp:g}, score {sc[str(sp)] / best:.3f}')
+        lo = min(np.percentile(r_o[m], 5), min(p[window].min() for _, p in preds))
+        hi = max(np.percentile(r_o[m], 95), max(p[window].max() for _, p in preds))
+        pad = max(0.01, 0.3 * (hi - lo))
+        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_xlim(mtmin, mtmax)
+        ax.set_xlabel('mT [GeV]')
+        ax.set_ylabel(f'{name} / central')
+        ax.set_title(f'{key[0]}\nsel-{key[1]}, {name}, held out {held}', fontsize=9)
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2, frameon=False, fontsize=9)
+        fig.savefig(osp.join(outdir, f'heldout_{key[0]}_sel-{key[1]}_{name}_ho{held}.png'), bbox_inches='tight')
+        plt.close(fig)
+
+
 def _worker(key, name, samples, spans, mtmin, mtmax):
     return key, name, score_template(samples, name, spans, mtmin, mtmax)
 
@@ -177,6 +225,10 @@ def main():
     ap.add_argument('--span-max', type=float, default=0.5, help='upper limit of the chosen span')
     ap.add_argument('--out', default='ratio_span_cv.json')
     ap.add_argument('--plot', default=None, help='directory for a summary plot per selection')
+    ap.add_argument('--plot-heldout', default=None,
+                    help='directory for per-fold plots of single templates (selected with --plot-match)')
+    ap.add_argument('--plot-match', default=None,
+                    help='regular expression on "<process>|<selection>|<variation>" for --plot-heldout')
     args = ap.parse_args()
 
     found = {m['year'] for m in (FNAME.match(osp.basename(f)) for f in args.jsonfiles) if m}
@@ -215,6 +267,12 @@ def main():
         print(f'{k:40s}' + ''.join(f'{summary[k][c]:8.3f}' for c in candidates) + f'{chosen[k]:8g}')
     if args.plot:
         plot(summary, args.spans, args.plot)
+    if args.plot_heldout:
+        pat = re.compile(args.plot_match or '$^')
+        for key, name, samples, *_ in tasks:
+            if pat.search(f'{key[0]}|{key[1]}|{name}'):
+                plot_heldout(key, name, samples, args.spans, args.mtmin, args.mtmax, args.plot_heldout,
+                             highlight=get_ratio_span(chosen, key[1], name, args.span_max))
 
 
 if __name__ == '__main__':
