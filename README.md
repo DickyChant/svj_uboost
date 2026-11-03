@@ -200,6 +200,12 @@ the RT map first: with `--rt_ddt_file`, the shifts of the BDT/ECF map are comput
 same way. For the selections in `common.py`, set `DDT_SMOOTH_SIGMA` (0 = off); the smoothing files are fetched from
 EOS together with the maps:
 
+The environment variable `DDT_SMOOTH_ORDER` (default 0) sets the degree of the smoothing: 0 is the weighted average
+described above; 1 (local-linear) and 2 (local-quadratic) fit a polynomial in each kernel window with the same weights.
+A fit of degree 1 or 2 follows a tilted or curved threshold surface without bias, so the local pass fraction is kept.
+Cells with too few populated neighbours fall back to a lower degree, and each result stays within the range of the
+populated thresholds in its kernel window. The degree is recorded in the smoothing file and checked when it is read.
+
 ```bash
 python apply_DDT.py --analysis_type RT --smooth_sigmas 1 2 --var_cuts 1.2 --ddt_map_file ./models/rt_ddt_map_ANv6_3d.json --bkg_files "root://cmseos.fnal.gov//store/user/lpcdarkqcd/boosted/skims_20241030_hadd/Summer20UL*/*.npz"
 python apply_DDT.py --analysis_type BDT-based --rt_sel 1.20 --rt_ddt_file ./models/rt_ddt_map_ANv6_3d.json --smooth_sigmas 1 2 --var_cuts 0.62 --ddt_map_file ./models/bdt_ddt_withRT_ANv6_3d.json --bkg_files "root://cmseos.fnal.gov//store/user/lpcdarkqcd/boosted/skims_20241030_hadd/Summer20UL*/*.npz"

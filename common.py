@@ -1148,6 +1148,57 @@ def ddt_neff(mt, pt, rt_sel, weight, MT_PT_edges, PT_edges, RT_edges):
     sumw2 = np.bincount(flat_idx, weights=w*w, minlength=int(np.prod(shape))).reshape(shape)
     return np.where(sumw2 > 0, sumw**2 / np.maximum(sumw2, 1e-300), 0.0)
 
+# Polynomial degree of the on-the-fly smoothing. 0 = N_eff-weighted average (as below); 1 = local-linear, 2 = local-quadratic
+# fit in (mt/pt, pt) bins with weights N_eff x Gaussian. A local fit of degree d follows a trend of degree d in the thresholds
+# without bias, so the local pass fraction is kept where the threshold surface is tilted (d >= 1) or curved (d = 2).
+DDT_SMOOTH_ORDER = int(os.environ.get('DDT_SMOOTH_ORDER', '0'))
+# Diagnostics: set to a list to collect, per slice fitted, the order used in each cell and the cells that were clipped
+DDT_SMOOTH_STATS = None
+
+def _local_poly_slice(v, w, sigma, order, base):
+    '''
+    Local polynomial fit of the thresholds v of one RT slice with weights w * Gaussian(sigma), evaluated at each cell.
+    Cells where the fit is ill-determined (too few populated neighbours along a direction) fall back to the next lower
+    order, and finally to base (the order-0 result); the result is limited to the range of the populated thresholds
+    within the kernel, so a fit cannot extrapolate beyond its data.
+    '''
+    from scipy.ndimage import correlate, maximum_filter, minimum_filter
+    r = int(4.0 * sigma + 0.5)                       # the truncation of gaussian_filter
+    d = np.arange(-r, r + 1, dtype=float) / sigma
+    dx, dy = np.meshgrid(d, d, indexing='ij')
+    K = np.exp(-0.5 * (dx**2 + dy**2))
+    out = base.copy()
+    used = np.zeros(v.shape, dtype=np.int8)
+    for o in range(1, order + 1):
+        basis = [(a, b) for a in range(o + 1) for b in range(o + 1 - a)]
+        mom, rhs = {}, {}
+        for a in range(2 * o + 1):
+            for b in range(2 * o + 1 - a):
+                mom[(a, b)] = correlate(w, K * dx**a * dy**b, mode='constant')
+        for a, b in basis:
+            rhs[(a, b)] = correlate(w * v, K * dx**a * dy**b, mode='constant')
+        n = len(basis)
+        M = np.empty(v.shape + (n, n))
+        B = np.empty(v.shape + (n,))
+        for i, (a, b) in enumerate(basis):
+            B[..., i] = rhs[(a, b)]
+            for j, (c, e) in enumerate(basis):
+                M[..., i, j] = mom[(a + c, b + e)]
+        diag = np.sqrt(np.clip(np.einsum('...ii->...i', M), 1e-300, None))
+        Mn = M / diag[..., :, None] / diag[..., None, :]
+        ok = (mom[(0, 0)] > 1e-12) & (np.linalg.cond(Mn) < 1e4)
+        sol = np.zeros(v.shape)
+        if ok.any():
+            sol[ok] = np.linalg.solve(Mn[ok], (B / diag)[ok][..., None])[..., 0, 0] / diag[ok][:, 0]
+        out = np.where(ok, sol, out)
+        used[ok] = o
+    populated = w > 0
+    hi = maximum_filter(np.where(populated, v, -np.inf), size=2 * r + 1, mode='constant', cval=-np.inf)
+    lo = minimum_filter(np.where(populated, v, np.inf), size=2 * r + 1, mode='constant', cval=np.inf)
+    if isinstance(DDT_SMOOTH_STATS, list):
+        DDT_SMOOTH_STATS.append({"order_used": used, "clipped": np.isfinite(hi) & ((out < lo) | (out > hi))})
+    return np.where(np.isfinite(hi), np.clip(out, lo, hi), out)
+
 def regularize_ddt_map(var_map, neff, sigma):
     '''
     Smooths the DDT thresholds in (mt/pt, pt) with a Gaussian of width sigma (in bins), separately for each RT slice.
@@ -1155,13 +1206,17 @@ def regularize_ddt_map(var_map, neff, sigma):
     populated bins are pulled towards their well populated neighbours rather than the other way around. Bins without MC
     events (stored as 0) do not contribute and do not dilute their neighbours, unlike in gaussian_filter(var_map), where
     they enter as thresholds of 0; within reach of the kernel they receive the weighted average of their populated
-    neighbours.
+    neighbours. With DDT_SMOOTH_ORDER > 0, a local polynomial fit with the same weights replaces the average
+    (_local_poly_slice).
     '''
     smoothed = np.zeros(var_map.shape)
     for k in range(var_map.shape[2]):
         num = gaussian_filter(var_map[:, :, k] * neff[:, :, k], sigma)
         den = gaussian_filter(neff[:, :, k], sigma)
-        smoothed[:, :, k] = np.where(den > 1e-12, num / np.maximum(den, 1e-300), 0.0)
+        sm = np.where(den > 1e-12, num / np.maximum(den, 1e-300), 0.0)
+        if DDT_SMOOTH_ORDER > 0:
+            sm = np.where(den > 1e-12, _local_poly_slice(var_map[:, :, k], neff[:, :, k], sigma, DDT_SMOOTH_ORDER, sm), 0.0)
+        smoothed[:, :, k] = sm
     return smoothed
 
 def smooth_ddt_map(var_map, neff, sigma, shifts):
@@ -1235,6 +1290,8 @@ def load_ddt_smoothing_info(ddt_name, info_name=None):
         info = json.load(f)
     if info.get("map_md5") != _file_md5(ddt_name):
         raise ValueError(f"{info_name} was made for a different version of {ddt_name} (md5 mismatch); remake it")
+    if info.get("order", 0) != DDT_SMOOTH_ORDER:
+        raise ValueError(f"{info_name} was made with DDT_SMOOTH_ORDER={info.get('order', 0)}, not {DDT_SMOOTH_ORDER}")
     return info
 
 def _write_ddt_smoothing_info(ddt_name, neff, shifts, info_name=None):
@@ -1244,11 +1301,11 @@ def _write_ddt_smoothing_info(ddt_name, neff, shifts, info_name=None):
     '''
     info_name = info_name or ddt_smoothing_info_name(ddt_name)
     md5 = _file_md5(ddt_name)
-    info = {"map_file": osp.basename(ddt_name), "map_md5": md5, "neff": neff, "smoothing_shifts": {}}
+    info = {"map_file": osp.basename(ddt_name), "map_md5": md5, "order": DDT_SMOOTH_ORDER, "neff": neff, "smoothing_shifts": {}}
     if osp.exists(info_name):
         with open(info_name, 'r') as f:
             old = json.load(f)
-        if old.get("map_md5") == md5:
+        if old.get("map_md5") == md5 and old.get("order", 0) == DDT_SMOOTH_ORDER:
             info["smoothing_shifts"] = old.get("smoothing_shifts", {})
     for key, by_sigma in shifts.items():
         info["smoothing_shifts"].setdefault(key, {}).update(by_sigma)
