@@ -11,6 +11,7 @@ import json
 import tqdm
 import multiprocessing as mp
 import multiprocessing.pool
+import concurrent.futures
 from cycler import cycler
 
 np.random.seed(1001)
@@ -335,34 +336,69 @@ def quick_subplots(*args, **kwargs):
         except Exception:
             pass
 
+def _cpu_count():
+    # CPUs this process may run on (e.g. a batch slot), not all cores of the machine as mp.cpu_count()
+    if hasattr(os, 'process_cpu_count'): # python >= 3.13 (also honours PYTHON_CPU_COUNT)
+        return os.process_cpu_count() or 1
+    if hasattr(os, 'sched_getaffinity'):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
+
 def _mp_count_compute(factor=None, max_thread=None):
-    # Simple switch for how many workers we should open in a pool
+    # Simple switch for how many workers we should open in a pool (at least one)
+    n_cpu = _cpu_count()
     if factor is None:
-        factor = 0.75 if mp.cpu_count() < 16 else 0.5
+        factor = 0.75 if n_cpu < 16 else 0.5
     if max_thread is None:
-        max_thread = mp.cpu_count()
-    return int(min([mp.cpu_count() * factor , max_thread]))
+        max_thread = n_cpu
+    return max(1, int(min([n_cpu * factor , max_thread])))
+
+class _ProcessPool:
+    """
+    map/starmap on a concurrent.futures process pool, replacing mp.Pool: a worker that dies (e.g. killed by the batch
+    system) raises BrokenProcessPool instead of hanging forever, and the first failing task cancels the tasks that have
+    not started yet. The workers are forked, so they see module state set in the parent before the pool is created
+    (e.g. the binning set by build_datacard.change_bin_width), whatever the default start method of the platform.
+    """
+    def __init__(self, n_workers):
+        self.executor = concurrent.futures.ProcessPoolExecutor(n_workers, mp_context=mp.get_context('fork'))
+
+    def _results(self, futures):
+        try:
+            return [f.result() for f in futures]
+        except BaseException:
+            for f in futures: f.cancel()
+            raise
+
+    def map(self, func, iterable):
+        return self._results([self.executor.submit(func, arg) for arg in iterable])
+
+    def starmap(self, func, iterable):
+        return self._results([self.executor.submit(func, *args) for args in iterable])
 
 @contextmanager
 def mp_pool(factor=None, max_thread=None):
+    n_threads = _mp_count_compute(factor, max_thread)
+    logger.info(f"Creating process pool with {n_threads} workers")
+    pool = _ProcessPool(n_threads)
     try:
-        n_threads = _mp_count_compute(factor, max_thread)
-        logger.info(f"Creating mp.Pool with {n_threads} workers")
-        yield mp.Pool(n_threads)
+        yield pool
     finally:
-        pass
+        pool.executor.shutdown(wait=True, cancel_futures=True)
 
 
 @contextmanager
 def mp_thread_pool(factor=None, max_thread=None):
     # Threading is required for if the function call uses variables that are
     # defined outside the function scope
+    n_threads = _mp_count_compute(factor, max_thread)
+    print(f"Creating thread pool with {n_threads} threads")
+    pool = mp.pool.ThreadPool(n_threads)
     try:
-        n_threads = _mp_count_compute(factor, max_thread)
-        print(f"Creating thread pool with {n_threads} threads")
-        yield mp.pool.ThreadPool(n_threads)
+        yield pool
     finally:
-        pass
+        pool.close()
+        pool.join()
 
 #__________________________________________________
 # Automatic cross section getter
@@ -1243,13 +1279,15 @@ def check_if_model_exists(model_file, xrootd_url):
     # Check if the file exists locally
     if not os.path.exists(model_file):
         print(f"File {model_file} not found. Downloading from {xrootd_url}...")
+        # download to a temporary file, then rename: parallel workers can download the same file at the same time
+        tmp_file = f"{model_file}.{os.getpid()}.tmp"
         try:
             os.makedirs(os.path.dirname(model_file), exist_ok=True)  # Ensure directory exists
-            subprocess.run(["xrdcp", xrootd_url+model_file, model_file], check=True)
+            subprocess.run(["xrdcp", "-f", xrootd_url+model_file, tmp_file], check=True)
+            os.replace(tmp_file, model_file)
             print(f"Downloaded {model_file} successfully.")
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Error downloading {model_file}: {e}")
-            return None
 
 # Direct selection
 SELECTION_RT_SIGNAL_REGION = 1.18
@@ -1365,6 +1403,7 @@ def _calc_rtcutbased_ddt_val(cols, lumi, cut_val, rt_ddt_file, rt_cut_val, ddt_m
     t_mask = np.ones_like(mT, dtype=bool)
     rt_mask = (rT > rt_cut_val)
     if rt_ddt_file is not None:
+        check_if_model_exists(rt_ddt_file, RT_DDT_PATH)
         rt_mask = calculate_varDDT(mT, t_mask, rT, rt_cut_val, rt_ddt_file, smear=RT_DDT_SMEAR) > 0.0
     ddt_val = calculate_varDDT(mT, rt_mask, ecfm2b1, cut_val, ddt_map_file, smear=RT_DDT_SMEAR)
     return ddt_val
@@ -1461,6 +1500,7 @@ def apply_antiloosebdt(cols,wp,lumi,rt_ddt_file=None,model_file=bdt_model_file,d
     t_mask = np.ones_like(mT, dtype=bool)
     rt_mask = (rT > SELECTION_RT_SIGNAL_REGION)
     if rt_ddt_file is not None:
+        check_if_model_exists(rt_ddt_file, RT_DDT_PATH)
         rt_mask = calculate_varDDT(mT, t_mask, rT, SELECTION_RTDDT_SIGNAL_REGION, rt_ddt_file, smear=RT_DDT_SMEAR) > 0.0
     bdt_ddt_score = calculate_varDDT(mT, rt_mask, score, wp, ddt_map_file, smear=RT_DDT_SMEAR)
 
@@ -1486,6 +1526,7 @@ def get_model_sf(cols, var="cen", sf_file=SF_FILE, xrootd_url=SF_PATH):
     pT = cols.to_numpy(['pt']).ravel()
     ecf = cols.to_numpy(['ecfm2b1']).ravel()
     m = np.ones_like(mT, dtype=bool)
+    check_if_model_exists(DDT_FILE_CUTBASED_RT_DDT, DDT_PATH_CUTBASED) # also needed by the BDT selections
     ddt_val = calculate_varDDT(mT, m, ecf, 0.1, DDT_FILE_CUTBASED_RT_DDT, smear=RT_DDT_SMEAR)
 
     bin_idx = np.digitize(ddt_val, bins=var_bin)
